@@ -36,23 +36,11 @@ import androidx.core.content.ContextCompat
 import androidx.core.os.bundleOf
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import androidx.media.MediaBrowserServiceCompat
-import com.google.android.exoplayer2.*
-import com.google.android.exoplayer2.analytics.AnalyticsListener
-import com.google.android.exoplayer2.audio.AudioAttributes
-import com.google.android.exoplayer2.ext.mediasession.MediaSessionConnector
-import com.google.android.exoplayer2.ext.mediasession.TimelineQueueNavigator
-import com.google.android.exoplayer2.metadata.Metadata
-import com.google.android.exoplayer2.metadata.icy.IcyHeaders
-import com.google.android.exoplayer2.metadata.icy.IcyInfo
-import com.google.android.exoplayer2.source.MediaSource
-import com.google.android.exoplayer2.source.ProgressiveMediaSource
-import com.google.android.exoplayer2.source.hls.HlsMediaSource
-import com.google.android.exoplayer2.ui.PlayerNotificationManager
-import com.google.android.exoplayer2.upstream.DataSource
-import com.google.android.exoplayer2.upstream.DefaultHttpDataSource
-import com.google.android.exoplayer2.util.Util
 import kotlinx.coroutines.*
 import kotlinx.coroutines.Dispatchers.Main
+import org.videolan.libvlc.LibVLC
+import org.videolan.libvlc.Media
+import org.videolan.libvlc.MediaPlayer
 import org.y20k.transistor.Keys
 import org.y20k.transistor.R
 import org.y20k.transistor.collection.CollectionProvider
@@ -86,29 +74,41 @@ class PlayerService(): MediaBrowserServiceCompat() {
     protected lateinit var mediaSession: MediaSessionCompat
     protected lateinit var mediaSessionConnector: MediaSessionConnector
     private lateinit var notificationHelper: NotificationHelper
-    private lateinit var userAgent: String
     private lateinit var modificationDate: Date
     private lateinit var collectionChangedReceiver: BroadcastReceiver
     private lateinit var sleepTimer: CountDownTimer
     private var sleepTimerTimeRemaining: Long = 0L
     private var playbackRestartCounter: Int = 0
 
-    private val attributes = AudioAttributes.Builder()
-            .setContentType(C.CONTENT_TYPE_MUSIC)
-            .setUsage(C.USAGE_MEDIA)
-            .build()
+    // 👉 libVLC 核心实例
+    private val libVLC: LibVLC by lazy {
+        val options = ArrayList<String>()
+        options.add("--no-audio-time-stretch")
+        options.add("--avcodec-codec=any")
+        LibVLC(this, options)
+    }
 
-    // 👉 已集成 DefaultRenderersFactory 并开启 FFmpeg 软解扩展优先，确保万能解码兼容性
-    private val player: ExoPlayer by lazy {
-        val renderersFactory = DefaultRenderersFactory(this).apply {
-            setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
-        }
-        ExoPlayer.Builder(this, renderersFactory).build().apply {
-            setAudioAttributes(attributes, true)
-            setHandleAudioBecomingNoisy(true)
-            repeatMode = Player.REPEAT_MODE_ALL
-            addListener(playerListener)
-            addAnalyticsListener(analyticsListener)
+    // 👉 libVLC 播放器实例
+    private val vlcPlayer: MediaPlayer by lazy {
+        MediaPlayer(libVLC).apply {
+            setEventListener { event ->
+                when (event.type) {
+                    MediaPlayer.Event.Playing -> {
+                        handlePlaybackChange(PlaybackStateCompat.STATE_PLAYING)
+                    }
+                    MediaPlayer.Event.Stopped, MediaPlayer.Event.EncounteredError -> {
+                        handlePlaybackChange(PlaybackStateCompat.STATE_STOPPED)
+                        if (event.type == MediaPlayer.Event.EncounteredError) {
+                            android.os.Handler(mainLooper).post {
+                                Toast.makeText(applicationContext, "VLC 播放出错", Toast.LENGTH_LONG).show()
+                            }
+                        }
+                    }
+                    MediaPlayer.Event.Buffering -> {
+                        handlePlaybackChange(PlaybackStateCompat.STATE_BUFFERING)
+                    }
+                }
+            }
         }
     }
 
@@ -116,13 +116,11 @@ class PlayerService(): MediaBrowserServiceCompat() {
     /* Overrides onCreate from Service */
     override fun onCreate() {
         super.onCreate()
-        // set user agent
-        userAgent = Util.getUserAgent(this, Keys.APPLICATION_NAME)
 
         // load modification date of collection
         modificationDate = PreferencesHelper.loadCollectionModificationDate()
 
-        // get the package validator // todo can be local?
+        // get the package validator
         packageValidator = PackageValidator(this, R.xml.allowed_media_browser_callers)
 
         // fetch the player state
@@ -137,19 +135,17 @@ class PlayerService(): MediaBrowserServiceCompat() {
         // create custom ForwardingPlayer used in Notification and playback control
         forwardingPlayer = createForwardingPlayer()
 
-        // ExoPlayer manages MediaSession
+        // MediaSessionConnector setup for libVLC integration
         mediaSessionConnector = MediaSessionConnector(mediaSession)
         mediaSessionConnector.setPlaybackPreparer(preparer)
         mediaSessionConnector.setQueueNavigator(object : TimelineQueueNavigator(mediaSession) {
             override fun getMediaDescription(player: Player, windowIndex: Int): MediaDescriptionCompat {
-                // create media description - used in notification
-                 return CollectionHelper.buildStationMediaDescription(this@PlayerService, station, getCurrentMetadata())
+                return CollectionHelper.buildStationMediaDescription(this@PlayerService, station, getCurrentMetadata())
             }
         })
 
         // initialize notification helper
         notificationHelper = NotificationHelper(this, mediaSession.sessionToken, notificationListener)
-//        notificationHelper.showNotificationForPlayer(forwardingPlayer)
 
         // create and register collection changed receiver
         collectionChangedReceiver = createCollectionChangedReceiver()
@@ -163,9 +159,8 @@ class PlayerService(): MediaBrowserServiceCompat() {
     /* Overrides onStartCommand from Service */
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
-        // handle start/stop requests issued via Intent - used for example by the home screen shortcuts
         if (intent != null && intent.action == Keys.ACTION_STOP) {
-            player.stop()
+            vlcPlayer.stop()
         }
         if (intent != null && intent.action == Keys.ACTION_START) {
             if (intent.hasExtra(Keys.EXTRA_STATION_UUID)) {
@@ -185,73 +180,48 @@ class PlayerService(): MediaBrowserServiceCompat() {
     }
 
 
-    /* Overrides onTaskRemoved from Service */
-    override fun onTaskRemoved(rootIntent: Intent) {
-        super.onTaskRemoved(rootIntent)
-        // kill service, if MainActivity was canceled through task switcher
-        //stopSelf()
-    }
-
-
     /* Overrides onDestroy from Service */
     override fun onDestroy() {
-        // set playback state if necessary
-        if (player.isPlaying) {
+        if (vlcPlayer.isPlaying) {
             handlePlaybackChange(PlaybackStateCompat.STATE_STOPPED)
         }
-        // release media session
+        vlcPlayer.stop()
+        vlcPlayer.release()
+        libVLC.release()
         mediaSession.run {
             isActive = false
             release()
         }
-        // release player
-        player.removeAnalyticsListener(analyticsListener)
-        player.removeListener(playerListener)
-        player.release()
+        super.onDestroy()
     }
 
 
     /* Updates metadata */
     private fun updateMetadata(metadata: String?) {
-        // get metadata string
-        val metadataString: String
-        if (metadata != null && metadata.isNotEmpty()) {
-            metadataString = metadata.substring(0, min(metadata.length, Keys.DEFAULT_MAX_LENGTH_OF_METADATA_ENTRY))
+        val metadataString: String = if (metadata != null && metadata.isNotEmpty()) {
+            metadata.substring(0, min(metadata.length, Keys.DEFAULT_MAX_LENGTH_OF_METADATA_ENTRY))
         } else {
-            metadataString = station.name
+            station.name
         }
-        // append metadata to metadata history
         if (metadataHistory.contains(metadataString)) {
             metadataHistory.removeIf { it == metadataString }
         }
         metadataHistory.add(metadataString)
-        // trim metadata list
         if (metadataHistory.size > Keys.DEFAULT_SIZE_OF_METADATA_HISTORY) {
             metadataHistory.removeAt(0)
         }
-        // update notification
-        // see: https://github.com/google/ExoPlayer/issues/5494#issuecomment-462476576
         mediaSessionConnector.invalidateMediaSessionQueue()
         mediaSessionConnector.invalidateMediaSessionMetadata()
         notificationHelper.updateNotification()
-        // save history
         PreferencesHelper.saveMetadataHistory(metadataHistory)
     }
 
 
-    /* Overrides onGetRoot from MediaBrowserService */ // todo: implement a hierarchical structure -> https://github.com/googlesamples/android-UniversalMusicPlayer/blob/47da058112cee0b70442bcd0370c1e46e830c66b/media/src/main/java/com/example/android/uamp/media/library/BrowseTree.kt
+    /* Overrides onGetRoot from MediaBrowserService */
     override fun onGetRoot(clientPackageName: String, clientUid: Int, rootHints: Bundle?): BrowserRoot {
-        // Credit: https://github.com/googlesamples/android-UniversalMusicPlayer (->  MusicService)
-        // LogHelper.d(TAG, "OnGetRoot: clientPackageName=$clientPackageName; clientUid=$clientUid ; rootHints=$rootHints")
-        // to ensure you are not allowing any arbitrary app to browse your app's contents, you need to check the origin
         if (!packageValidator.isKnownCaller(clientPackageName, clientUid)) {
-            // request comes from an untrusted package
-            LogHelper.i(TAG, "OnGetRoot: Browsing NOT ALLOWED for unknown caller. "
-                    + "Returning empty browser root so all apps can use MediaController."
-                    + clientPackageName)
             return BrowserRoot(Keys.MEDIA_BROWSER_ROOT_EMPTY, null)
         } else {
-            // content style extras: see https://developer.android.com/training/cars/media#apply_content_style
             val CONTENT_STYLE_SUPPORTED = "android.media.browse.CONTENT_STYLE_SUPPORTED"
             val CONTENT_STYLE_PLAYABLE_HINT = "android.media.browse.CONTENT_STYLE_PLAYABLE_HINT"
             val CONTENT_STYLE_BROWSABLE_HINT = "android.media.browse.CONTENT_STYLE_BROWSABLE_HINT"
@@ -262,7 +232,6 @@ class PlayerService(): MediaBrowserServiceCompat() {
                     CONTENT_STYLE_BROWSABLE_HINT to CONTENT_STYLE_GRID_ITEM_HINT_VALUE,
                     CONTENT_STYLE_PLAYABLE_HINT to CONTENT_STYLE_LIST_ITEM_HINT_VALUE
             )
-            // check if rootHints contained EXTRA_RECENT - return BrowserRoot with MEDIA_BROWSER_ROOT_RECENT in that case
             val isRecentRequest = rootHints?.getBoolean(BrowserRoot.EXTRA_RECENT) ?: false
             val browserRootPath: String = if (isRecentRequest) Keys.MEDIA_BROWSER_ROOT_RECENT else Keys.MEDIA_BROWSER_ROOT
             return BrowserRoot(browserRootPath, rootExtras)
@@ -273,7 +242,6 @@ class PlayerService(): MediaBrowserServiceCompat() {
     /* Overrides onLoadChildren from MediaBrowserService */
     override fun onLoadChildren(parentId: String, result: Result<MutableList<MediaBrowserCompat.MediaItem>>) {
         if (!collectionProvider.isInitialized()) {
-            // use result.detach to allow calling result.sendResult from another thread:
             result.detach()
             collectionProvider.retrieveMedia(this, collection, object: CollectionProvider.CollectionProviderCallback {
                 override fun onStationListReady(success: Boolean) {
@@ -283,7 +251,6 @@ class PlayerService(): MediaBrowserServiceCompat() {
                 }
             })
         } else {
-            // if music catalog is already loaded/cached, load them into result immediately
             loadChildren(parentId, result)
         }
     }
@@ -291,12 +258,10 @@ class PlayerService(): MediaBrowserServiceCompat() {
 
     /* Updates media session and save state */
     private fun handlePlaybackChange(playbackState: Int) {
-        // reset restart counter
         playbackRestartCounter = 0
-        // save collection state and player state
         collection = CollectionHelper.savePlaybackState(this, collection, station, playbackState)
         updatePlayerState(station, playbackState)
-        if (player.isPlaying) {
+        if (vlcPlayer.isPlaying) {
             notificationHelper.showNotificationForPlayer(forwardingPlayer)
         } else {
             updateMetadata(null)
@@ -306,34 +271,30 @@ class PlayerService(): MediaBrowserServiceCompat() {
 
     /* Try to restart Playback */
     private fun handlePlaybackEnded() {
-        // restart playback for up to five times
         if (playbackRestartCounter < 5) {
             playbackRestartCounter++
-            player.stop()
-            player.play()
+            vlcPlayer.stop()
+            vlcPlayer.play()
         } else {
-            player.stop()
+            vlcPlayer.stop()
             Toast.makeText(this, this.getString(R.string.toastmessage_error_restart_playback_failed), Toast.LENGTH_LONG).show()
         }
     }
 
 
-    /* Creates a forwardingPlayer that overrides default exoplayer behavior */
+    /* Creates a forwardingPlayer adapter for libVLC */
     private fun createForwardingPlayer() : ForwardingPlayer {
-        return object : ForwardingPlayer(player) {
-            // emulate headphone buttons
-            // start/pause: adb shell input keyevent 85
-            // next: adb shell input keyevent 87
-            // prev: adb shell input keyevent 88
+        // 使用一个轻量适配层让 ForwardingPlayer 能够控制 libVLC 播放器
+        return object : ForwardingPlayer(PlayerStub(vlcPlayer)) {
             override fun stop(reset: Boolean) {
                 stop()
             }
             override fun stop() {
-                player.stop()
+                vlcPlayer.stop()
                 notificationHelper.hideNotification()
             }
             override fun pause() {
-                player.stop() /* pause command translates internally to stop() */
+                vlcPlayer.stop()
             }
             override fun seekForward() {
                 seekToNext()
@@ -342,16 +303,12 @@ class PlayerService(): MediaBrowserServiceCompat() {
                 seekToPrevious()
             }
             override fun seekToNext() {
-                // stop current playback, if necessary
-                if (player.isPlaying) player.stop()
-                // get station start playback
+                if (vlcPlayer.isPlaying) vlcPlayer.stop()
                 station = CollectionHelper.getNextStation(collection, station.uuid)
                 preparer.onPrepare(true)
             }
             override fun seekToPrevious() {
-                // stop current playback, if necessary
-                if (player.isPlaying) player.stop()
-                // get station start playback
+                if (vlcPlayer.isPlaying) vlcPlayer.stop()
                 station = CollectionHelper.getPreviousStation(collection, station.uuid)
                 preparer.onPrepare(true)
             }
@@ -372,24 +329,241 @@ class PlayerService(): MediaBrowserServiceCompat() {
     }
 
 
-    /* Prepares player with media source created from current station */
+    /* Prepares player with media source created from current station using libVLC */
     private fun preparePlayer(playWhenReady: Boolean) {
-        // sanity check
         if (!station.isValid()) {
             LogHelper.e(TAG, "Unable to start playback. No radio station has been loaded.")
             return
         }
 
-        // stop playback if necessary
-        if (player.isPlaying) { player.stop() }
-
-        // build media item with explicit mime type for m3u8 streams to avoid detection issues
-        val streamUriString = station.getStreamUri()
-        val mediaItemBuilder = MediaItem.Builder().setUri(streamUriString)
-        if (streamUriString.contains(".m3u8", ignoreCase = true)) {
-            mediaItemBuilder.setMimeType(com.google.android.exoplayer2.util.MimeTypes.APPLICATION_M3U8)
+        if (vlcPlayer.isPlaying) {
+            vlcPlayer.stop()
         }
-        val mediaItem: MediaItem = mediaItemBuilder.build()
 
-        // create DataSource.Factory with browser User-Agent and CDN Referer anti-leech headers
-        val customUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)
+        val streamUriString = station.getStreamUri()
+        try {
+            val media = Media(libVLC, Uri.parse(streamUriString))
+            
+            // 注入浏览器 User-Agent 以及阿里云 CDN 防盗链 Referer/Origin 请求头
+            val customUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            media.addOption(":http-user-agent=$customUserAgent")
+            media.addOption(":http-referrer=https://v.myalicdn.com/")
+            media.addOption(":network-caching=1500") // 设置网络缓存，防止直播流卡顿
+            
+            vlcPlayer.media = media
+            media.release()
+
+            if (playWhenReady) {
+                vlcPlayer.play()
+            }
+            updateMetadata(station.name)
+        } catch (e: Exception) {
+            LogHelper.e(TAG, "Failed to prepare libVLC media: $e")
+        }
+    }
+
+
+    /* Starts sleep timer */
+    private fun startSleepTimer() {
+        if (sleepTimerTimeRemaining > 0L && this::sleepTimer.isInitialized) {
+            sleepTimer.cancel()
+        }
+        sleepTimer = object:CountDownTimer(Keys.SLEEP_TIMER_DURATION + sleepTimerTimeRemaining, Keys.SLEEP_TIMER_INTERVAL) {
+            override fun onFinish() {
+                sleepTimerTimeRemaining = 0L
+                vlcPlayer.stop()
+            }
+            override fun onTick(millisUntilFinished: Long) {
+                sleepTimerTimeRemaining = millisUntilFinished
+            }
+        }
+        sleepTimer.start()
+    }
+
+
+    /* Cancels sleep timer */
+    private fun cancelSleepTimer() {
+        if (this::sleepTimer.isInitialized) {
+            sleepTimerTimeRemaining = 0L
+            sleepTimer.cancel()
+        }
+    }
+
+
+    /* Loads media items into result */
+    private fun loadChildren(parentId: String, result: Result<MutableList<MediaBrowserCompat.MediaItem>>) {
+        val mediaItems = ArrayList<MediaBrowserCompat.MediaItem>()
+        when (parentId) {
+            Keys.MEDIA_BROWSER_ROOT -> {
+                collectionProvider.stationListByName.forEach { item ->
+                    mediaItems.add(item)
+                }
+            }
+            Keys.MEDIA_BROWSER_ROOT_RECENT -> {}
+            Keys.MEDIA_BROWSER_ROOT_EMPTY -> {}
+            else -> {}
+        }
+        result.sendResult(mediaItems)
+    }
+
+
+    /* Creates collection changed receiver */
+    private fun createCollectionChangedReceiver(): BroadcastReceiver {
+        return object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                if (intent.hasExtra(Keys.EXTRA_COLLECTION_MODIFICATION_DATE)) {
+                    val date: Date = Date(intent.getLongExtra(Keys.EXTRA_COLLECTION_MODIFICATION_DATE, 0L))
+                    if (date.after(collection.modificationDate)) {
+                        loadCollection(context)
+                    }
+                }
+            }
+        }
+    }
+
+
+    /* Reads collection */
+    private fun loadCollection(context: Context) {
+        CoroutineScope(Main).launch {
+            val deferred: Deferred<Collection> = async(Dispatchers.Default) { FileHelper.readCollectionSuspended(context) }
+            collection = deferred.await()
+            if (playerState.playbackState == PlaybackState.STATE_PLAYING && station.name == getCurrentMetadata()) {
+                station = CollectionHelper.getStation(collection, station.uuid)
+                updateMetadata(null)
+            }
+        }
+    }
+
+
+    /* Updates player state */
+    private fun updatePlayerState(station: Station, playbackState: Int) {
+        if (station.isValid()) {
+            playerState.stationUuid = station.uuid
+        }
+        playerState.playbackState = playbackState
+        PreferencesHelper.savePlayerState(playerState)
+    }
+
+
+    /* Gets current metadata */
+    private fun getCurrentMetadata(): String {
+        return if (metadataHistory.isEmpty()) {
+            station.name
+        } else {
+            metadataHistory.last()
+        }
+    }
+
+
+    /* Notification listener */
+    private val notificationListener = object : PlayerNotificationManager.NotificationListener {
+        override fun onNotificationCancelled(notificationId: Int, dismissedByUser: Boolean) {
+            super.onNotificationCancelled(notificationId, dismissedByUser)
+            stopForeground(true)
+            isForegroundService = false
+            stopSelf()
+        }
+
+        override fun onNotificationPosted(notificationId: Int, notification: Notification, ongoing: Boolean) {
+            super.onNotificationPosted(notificationId, notification, ongoing)
+            if (ongoing && !isForegroundService) {
+                ContextCompat.startForegroundService(applicationContext, Intent(applicationContext, this@PlayerService.javaClass))
+                startForeground(Keys.NOW_PLAYING_NOTIFICATION_ID, notification)
+                isForegroundService = true
+            }
+        }
+    }
+
+
+    /* PlaybackPreparer */
+    private val preparer = object : MediaSessionConnector.PlaybackPreparer {
+        override fun getSupportedPrepareActions(): Long =
+                PlaybackStateCompat.ACTION_PREPARE_FROM_MEDIA_ID or
+                        PlaybackStateCompat.ACTION_PLAY_FROM_MEDIA_ID or
+                        PlaybackStateCompat.ACTION_PREPARE_FROM_SEARCH or
+                        PlaybackStateCompat.ACTION_PLAY_FROM_SEARCH
+
+        override fun onPrepareFromUri(uri: Uri, playWhenReady: Boolean, extras: Bundle?) = Unit
+
+        override fun onPrepare(playWhenReady: Boolean) {
+            if (station.isValid()) {
+                preparePlayer(playWhenReady)
+            } else {
+                val currentStationUuid: String = PreferencesHelper.loadLastPlayedStationUuid()
+                onPrepareFromMediaId(currentStationUuid, playWhenReady, null)
+            }
+        }
+
+        override fun onPrepareFromMediaId(mediaId: String, playWhenReady: Boolean, extras: Bundle?) {
+            station = CollectionHelper.getStation(collection, mediaId ?: String())
+            preparePlayer(playWhenReady)
+        }
+
+        override fun onPrepareFromSearch(query: String, playWhenReady: Boolean, extras: Bundle?) {
+            if (query.isEmpty()) {
+                val stationMediaItem: MediaBrowserCompat.MediaItem? = collectionProvider.getFirstStation()
+                if (stationMediaItem != null) {
+                    onPrepareFromMediaId(stationMediaItem.mediaId!!, playWhenReady = true, extras = null)
+                }
+            } else {
+                val queryLowercase: String = query.lowercase(Locale.getDefault())
+                collectionProvider.stationListByName.forEach { mediaItem ->
+                    val stationName: String = mediaItem.description.title.toString().lowercase(Locale.getDefault())
+                    if (stationName == queryLowercase) {
+                        onPrepareFromMediaId(mediaItem.description.mediaId!!, playWhenReady = true, extras = null)
+                        return
+                    }
+                }
+            }
+        }
+
+        override fun onCommand(player: Player, command: String, extras: Bundle?, cb: ResultReceiver?): Boolean {
+            when (command) {
+                Keys.CMD_RELOAD_PLAYER_STATE -> {
+                    playerState = PreferencesHelper.loadPlayerState()
+                    return true
+                }
+                Keys.CMD_REQUEST_PROGRESS_UPDATE -> {
+                    if (cb != null) {
+                        if (station.isValid()) {
+                            val playbackProgressBundle: Bundle = bundleOf(Keys.RESULT_DATA_METADATA to metadataHistory)
+                            if (sleepTimerTimeRemaining > 0L) {
+                                playbackProgressBundle.putLong(Keys.RESULT_DATA_SLEEP_TIMER_REMAINING, sleepTimerTimeRemaining)
+                            }
+                            cb.send(Keys.RESULT_CODE_PERIODIC_PROGRESS_UPDATE, playbackProgressBundle)
+                            return true
+                        }
+                    }
+                    return false
+                }
+                Keys.CMD_START_SLEEP_TIMER -> {
+                    startSleepTimer()
+                    return true
+                }
+                Keys.CMD_CMD_CANCEL_SLEEP_TIMER -> {
+                    cancelSleepTimer()
+                    return true
+                }
+                Keys.CMD_PLAY_STREAM -> {
+                    val streamUri: String = extras?.getString(Keys.KEY_STREAM_URI) ?: String()
+                    station = CollectionHelper.getStationWithStreamUri(collection, streamUri)
+                    preparePlayer(true)
+                    return true
+                }
+                else -> return false
+            }
+        }
+    }
+
+
+    /* AudioFX Analytics */
+    private var analyticsListener = object: AnalyticsListener {
+        override fun onAudioSessionIdChanged(eventTime: AnalyticsListener.EventTime, audioSessionId: Int) {
+            super.onAudioSessionIdChanged(eventTime, audioSessionId)
+            val intent = Intent(AudioEffect.ACTION_OPEN_AUDIO_EFFECT_CONTROL_SESSION)
+            intent.putExtra(AudioEffect.EXTRA_AUDIO_SESSION, audioSessionId)
+            intent.putExtra(AudioEffect.EXTRA_PACKAGE_NAME, packageName)
+            sendBroadcast(intent)
+        }
+    }
+}
