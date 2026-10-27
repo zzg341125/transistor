@@ -564,6 +564,16 @@ class PlayerService(): MediaBrowserServiceCompat() {
             }
         }
 
+        // 👉 捕获播放异常并在屏幕上弹窗提示具体的错误原因
+        override fun onPlayerError(error: PlaybackException) {
+            super.onPlayerError(error)
+            val errorMsg = error.localizedMessage ?: "Unknown error"
+            LogHelper.e(TAG, "ExoPlayer Error Code: ${error.errorCodeName}, Message: $errorMsg")
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                Toast.makeText(applicationContext, "播放失败: ${error.errorCodeName}", Toast.LENGTH_LONG).show()
+            }
+        }
+
         override fun onMetadata(metadata: Metadata) {
             super.onMetadata(metadata)
             for (i in 0 until metadata.length()) {
