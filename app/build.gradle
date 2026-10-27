@@ -74,9 +74,10 @@ dependencies {
 
     def exoplayerVersion = "2.17.1"
     implementation "com.google.android.exoplayer:exoplayer:$exoplayerVersion"
-    // 👉 已在此处成功添加 HLS 解析库，用于支持 .m3u8 直播流播放
     implementation "com.google.android.exoplayer:exoplayer-hls:$exoplayerVersion"
     implementation "com.google.android.exoplayer:extension-mediasession:$exoplayerVersion"
+    // 👉 已成功添加 ExoPlayer FFmpeg 软解扩展
+    implementation "com.google.android.exoplayer:extension-ffmpeg:$exoplayerVersion"
 
     implementation "com.google.code.gson:gson:2.9.0"
     implementation 'com.android.volley:volley:1.2.1'
