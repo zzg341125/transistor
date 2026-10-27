@@ -76,8 +76,9 @@ dependencies {
     implementation "com.google.android.exoplayer:exoplayer:$exoplayerVersion"
     implementation "com.google.android.exoplayer:exoplayer-hls:$exoplayerVersion"
     implementation "com.google.android.exoplayer:extension-mediasession:$exoplayerVersion"
-    // 👉 已成功添加 ExoPlayer FFmpeg 软解扩展
-    implementation "com.google.android.exoplayer:extension-ffmpeg:$exoplayerVersion"
+    
+    // 👉 已换用 libVLC 万能解码核心，自带完整 FFmpeg 引擎
+    implementation 'org.videolan.android:libvlc-all:3.6.5'
 
     implementation "com.google.code.gson:gson:2.9.0"
     implementation 'com.android.volley:volley:1.2.1'
