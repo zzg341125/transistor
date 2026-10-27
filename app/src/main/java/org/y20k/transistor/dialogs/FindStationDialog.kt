@@ -36,6 +36,7 @@ import org.y20k.transistor.helpers.LogHelper
 import org.y20k.transistor.search.RadioBrowserResult
 import org.y20k.transistor.search.RadioBrowserResultAdapter
 import org.y20k.transistor.search.RadioBrowserSearch
+import java.util.*
 
 
 /*
@@ -115,6 +116,15 @@ class FindStationDialog (private var context: Context, private var listener: Fin
 
         // add okay ("import") button
         builder.setPositiveButton(R.string.dialog_find_station_button_add) { _, _ ->
+            // 扩展思维：如果是直接输入的 URL（例如 .m3u8 链接），在此处自动初始化一个合法的 Station 对象
+            if (remoteStationLocation.isNotEmpty() && station.streamUris.isEmpty()) {
+                station = Station(
+                    name = "CCTV-13",
+                    streamUris = mutableListOf(remoteStationLocation),
+                    streamContent = if (remoteStationLocation.contains(".m3u8", ignoreCase = true)) Keys.MIME_TYPE_HLS else Keys.MIME_TYPE_MPEG,
+                    modificationDate = GregorianCalendar.getInstance().time
+                )
+            }
             // listen for click on add button
             (listener).onFindStationDialog(remoteStationLocation, station)
         }
