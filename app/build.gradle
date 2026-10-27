@@ -5,7 +5,6 @@ apply plugin: 'kotlin-parcelize'
 
 android {
     compileSdkVersion 32
-    // buildToolsVersion is optional because the plugin uses a recommended version by default
 
     defaultConfig {
         applicationId 'org.y20k.transistor'
@@ -31,30 +30,19 @@ android {
 
     buildTypes {
         release {
-            // Enables code shrinking, obfuscation, and optimization for only
-            // your project's release build type.
             minifyEnabled true
-
-            // Enables resource shrinking, which is performed by the
-            // Android Gradle plugin.
             shrinkResources true
-
-            // Includes the default ProGuard rules files that are packaged with
-            // the Android Gradle plugin. To learn more, go to the section about
-            // R8 configuration files.
             proguardFiles getDefaultProguardFile(
                     'proguard-android-optimize.txt'),
                     'proguard-rules.pro'
         }
         debug {
-            // Comment out the below lines if you do not need to test resource shrinking
 //            minifyEnabled true
 //            shrinkResources true
 //            proguardFiles getDefaultProguardFile(
 //                    'proguard-android-optimize.txt'),
 //                    'proguard-rules.pro'
         }
-
     }
 }
 
@@ -86,9 +74,10 @@ dependencies {
 
     def exoplayerVersion = "2.17.1"
     implementation "com.google.android.exoplayer:exoplayer:$exoplayerVersion"
+    // 👉 已在此处成功添加 HLS 解析库，用于支持 .m3u8 直播流播放
+    implementation "com.google.android.exoplayer:exoplayer-hls:$exoplayerVersion"
     implementation "com.google.android.exoplayer:extension-mediasession:$exoplayerVersion"
 
     implementation "com.google.code.gson:gson:2.9.0"
     implementation 'com.android.volley:volley:1.2.1'
-
 }
