@@ -387,10 +387,15 @@ class PlayerService(): MediaBrowserServiceCompat() {
         }
         val mediaItem: MediaItem = mediaItemBuilder.build()
 
-        // create DataSource.Factory - produces DataSource instances through which media data is loaded with browser User-Agent
+        // create DataSource.Factory with browser User-Agent and CDN Referer anti-leech headers
         val customUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         val dataSourceFactory: DataSource.Factory = DefaultHttpDataSource.Factory().apply {
             setUserAgent(customUserAgent)
+            // 针对阿里云 CDN 补充 Referer 和 Origin 防盗链请求头
+            setDefaultRequestProperties(mapOf(
+                "Referer" to "https://v.myalicdn.com/",
+                "Origin" to "https://v.myalicdn.com"
+            ))
             // follow http redirects and handle CDN restrictions
             setAllowCrossProtocolRedirects(true)
         }
