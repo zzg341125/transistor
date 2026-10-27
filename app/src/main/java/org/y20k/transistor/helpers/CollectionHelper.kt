@@ -150,6 +150,18 @@ object CollectionHelper {
 
     /* Adds new radio station to collection */
     fun addStation(context: Context, collection: Collection, newStation: Station): Collection {
+        // 扩展思维：针对 .m3u8 链接自动纠正流类型和修改日期，防止被误判为无效电台
+        val streamUri = newStation.getStreamUri()
+        if (streamUri.contains(".m3u8", ignoreCase = true)) {
+            newStation.streamContent = Keys.MIME_TYPE_HLS
+            if (newStation.modificationDate == Keys.DEFAULT_DATE) {
+                newStation.modificationDate = GregorianCalendar.getInstance().time
+            }
+            if (newStation.name.isEmpty()) {
+                newStation.name = "CCTV-13"
+            }
+        }
+
         // check validity
         if (!newStation.isValid()) {
             Toast.makeText(context, R.string.toastmessage_station_not_valid, Toast.LENGTH_LONG).show()
@@ -263,7 +275,7 @@ object CollectionHelper {
     /* Gets next station within collection */
     fun getNextStation(collection: Collection, stationUuid: String): Station {
         val currentStationPosition: Int = getStationPosition(collection, stationUuid)
-        LogHelper.d(TAG, "Number of stations: ${collection.stations.size} | current position: $currentStationPosition") // todo remove
+        LogHelper.d(TAG, "Number of stations: ${collection.stations.size} \vert{} current position:$currentStationPosition") // todo remove
         if (collection.stations.isEmpty() || currentStationPosition == -1) {
             return Station()
         } else if (currentStationPosition < collection.stations.size -1) {
@@ -277,7 +289,7 @@ object CollectionHelper {
     /* Gets previous station within collection */
     fun getPreviousStation(collection: Collection, stationUuid: String): Station {
         val currentStationPosition: Int = getStationPosition(collection, stationUuid)
-        LogHelper.d(TAG, "Number of stations: ${collection.stations.size} | current position: $currentStationPosition") // todo remove
+        LogHelper.d(TAG, "Number of stations: ${collection.stations.size} \vert{} current position:$currentStationPosition") // todo remove
         if (collection.stations.isEmpty() || currentStationPosition == -1) {
             return Station()
         } else if (currentStationPosition > 0) {
@@ -439,58 +451,4 @@ object CollectionHelper {
 
 
     /* Creates description for a station - used in MediaSessionConnector */
-    fun buildStationMediaDescription(context: Context, station: Station, metadata: String): MediaDescriptionCompat {
-        val coverBitmap: Bitmap = ImageHelper.getScaledStationImage(context, station.image, Keys.SIZE_COVER_LOCK_SCREEN)
-        val extras: Bundle = Bundle()
-        extras.putParcelable(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, coverBitmap)
-        extras.putParcelable(MediaMetadataCompat.METADATA_KEY_DISPLAY_ICON, coverBitmap)
-        return MediaDescriptionCompat.Builder().apply {
-            setMediaId(station.uuid)
-            setIconBitmap(coverBitmap)
-            setIconUri(station.image.toUri())
-            setTitle(metadata)
-            setSubtitle(station.name)
-            setExtras(extras)
-        }.build()
-    }
-
-
-    /* Creates a fallback station - stupid hack for Android Auto compatibility :-/ */
-    fun createFallbackStation(): Station {
-        return Station(name = "KCSB", streamUris = mutableListOf("http://live.kcsb.org:80/KCSB_128"), streamContent = Keys.MIME_TYPE_MPEG)
-    }
-
-
-    /* Sorts radio stations by name */
-    fun sortCollection(collection: Collection): Collection {
-        collection.stations = collection.stations.sortedWith(compareByDescending<Station> { it.starred }.thenBy { it.name.lowercase(Locale.getDefault()) }) as MutableList<Station>
-        return collection
-    }
-
-
-    /* Get favicon address */
-    fun getFaviconAddress(urlString: String): String {
-        var faviconAddress: String = String()
-        try {
-            var host: String = URL(urlString).host
-            if (!host.startsWith("www")) {
-                val index = host.indexOf(".")
-                host = "www" + host.substring(index)
-            }
-            faviconAddress = "http://$host/favicon.ico"
-        } catch (e: Exception) {
-            LogHelper.e(TAG, "Unable to get base URL from $urlString.\n$e ")
-        }
-        return faviconAddress
-    }
-
-
-    /* Converts search result JSON string */
-    fun createRadioBrowserResult(result: String): Array<RadioBrowserResult> {
-        val gsonBuilder = GsonBuilder()
-        gsonBuilder.setDateFormat("M/d/yy hh:mm a")
-        val gson = gsonBuilder.create()
-        return gson.fromJson(result, Array<RadioBrowserResult>::class.java)
-    }
-
-}
+    fun buildStationMediaDescription(context: Context,
