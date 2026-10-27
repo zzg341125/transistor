@@ -59,7 +59,7 @@ data class Station (@Expose val uuid: String = UUID.randomUUID().toString(),
 
 
     /* Getter for currently selected stream */
-    getStreamUri(): String {
+    fun getStreamUri(): String {
         if (streamUris.isNotEmpty()) {
             return streamUris[stream]
         } else {
@@ -70,7 +70,6 @@ data class Station (@Expose val uuid: String = UUID.randomUUID().toString(),
 
     /* Checks if a Station has the minimum required elements / data - 强制放宽校验，绕过格式限制 */
     fun isValid(): Boolean {
-        // 只要有 uuid、名字、且有播放地址，就认为电台有效，彻底解决“电台无效”报错
         return uuid.isNotEmpty() && name.isNotEmpty() && streamUris.isNotEmpty() && streamUris[stream].isNotEmpty()
     }
 
