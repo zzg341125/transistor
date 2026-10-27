@@ -36,6 +36,11 @@ import androidx.core.content.ContextCompat
 import androidx.core.os.bundleOf
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import androidx.media.MediaBrowserServiceCompat
+import com.google.android.exoplayer2.*
+import com.google.android.exoplayer2.analytics.AnalyticsListener
+import com.google.android.exoplayer2.ext.mediasession.MediaSessionConnector
+import com.google.android.exoplayer2.ext.mediasession.TimelineQueueNavigator
+import com.google.android.exoplayer2.ui.PlayerNotificationManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.Dispatchers.Main
 import org.videolan.libvlc.LibVLC
@@ -348,7 +353,7 @@ class PlayerService(): MediaBrowserServiceCompat() {
             val customUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             media.addOption(":http-user-agent=$customUserAgent")
             media.addOption(":http-referrer=https://v.myalicdn.com/")
-            media.addOption(":network-caching=1500") // 设置网络缓存，防止直播流卡顿
+            media.addOption(":network-caching=1500")
             
             vlcPlayer.media = media
             media.release()
@@ -540,7 +545,7 @@ class PlayerService(): MediaBrowserServiceCompat() {
                     startSleepTimer()
                     return true
                 }
-                Keys.CMD_CMD_CANCEL_SLEEP_TIMER -> {
+                Keys.CMD_CANCEL_SLEEP_TIMER -> {
                     cancelSleepTimer()
                     return true
                 }
