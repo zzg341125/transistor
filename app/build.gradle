@@ -72,12 +72,13 @@ dependencies {
 
     implementation 'androidx.work:work-runtime-ktx:2.7.1'
 
+    // 保留 ExoPlayer 核心与扩展，用于支持通知栏和会话逻辑
     def exoplayerVersion = "2.17.1"
     implementation "com.google.android.exoplayer:exoplayer:$exoplayerVersion"
     implementation "com.google.android.exoplayer:exoplayer-hls:$exoplayerVersion"
     implementation "com.google.android.exoplayer:extension-mediasession:$exoplayerVersion"
     
-    // 👉 已换用 libVLC 万能解码核心，自带完整 FFmpeg 引擎
+    // 集成 libVLC 万能解码核心库
     implementation 'org.videolan.android:libvlc-all:3.6.5'
 
     implementation "com.google.code.gson:gson:2.9.0"
