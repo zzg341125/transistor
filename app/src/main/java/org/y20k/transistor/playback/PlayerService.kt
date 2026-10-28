@@ -44,9 +44,7 @@ import com.google.android.exoplayer2.ext.mediasession.TimelineQueueNavigator
 import com.google.android.exoplayer2.metadata.Metadata
 import com.google.android.exoplayer2.metadata.icy.IcyHeaders
 import com.google.android.exoplayer2.metadata.icy.IcyInfo
-import com.google.android.exoplayer2.source.MediaSource
 import com.google.android.exoplayer2.source.ProgressiveMediaSource
-import com.google.android.exoplayer2.source.hls.HlsMediaSource
 import com.google.android.exoplayer2.ui.PlayerNotificationManager
 import com.google.android.exoplayer2.upstream.DataSource
 import com.google.android.exoplayer2.upstream.DefaultHttpDataSource
@@ -101,7 +99,7 @@ class PlayerService(): MediaBrowserServiceCompat() {
             .setUsage(C.USAGE_MEDIA)
             .build()
 
-    // 1. 标准 ExoPlayer 实例（用于支撑 ForwardingPlayer、通知栏和常规流）
+    // 1. 标准 ExoPlayer 实例
     private val player: ExoPlayer by lazy {
         ExoPlayer.Builder(this).build().apply {
             setAudioAttributes(attributes, true)
@@ -112,7 +110,7 @@ class PlayerService(): MediaBrowserServiceCompat() {
         }
     }
 
-    // 2. libVLC 实例与万能播放器（专门用于攻克 .m3u8 / TS 复杂流）
+    // 2. libVLC 实例与万能播放器
     private val libVLC: LibVLC by lazy {
         val options = ArrayList<String>()
         options.add("--no-audio-time-stretch")
@@ -362,21 +360,19 @@ class PlayerService(): MediaBrowserServiceCompat() {
     }
 
 
-    /* Prepares player: .m3u8 streams use libVLC, regular streams use ExoPlayer */
+    /* Prepares player */
     private fun preparePlayer(playWhenReady: Boolean) {
         if (!station.isValid()) {
             LogHelper.e(TAG, "Unable to start playback. No radio station has been loaded.")
             return
         }
 
-        // 停止之前的播放
         if (isPlaying()) {
             stopPlayback()
         }
 
         val streamUriString = station.getStreamUri()
 
-        // 判断是否为 .m3u8 复杂流，如果是则使用 libVLC 软解播放，否则使用 ExoPlayer
         if (streamUriString.contains(".m3u8", ignoreCase = true) || station.streamContent in Keys.MIME_TYPE_HLS) {
             isUsingVlc = true
             try {
@@ -501,6 +497,63 @@ class PlayerService(): MediaBrowserServiceCompat() {
             station.name
         } else {
             metadataHistory.last()
+        }
+    }
+
+
+    /* Player.Listener for ExoPlayer */
+    private val playerListener = object : Player.Listener {
+        override fun onIsPlayingChanged(isPlaying: Boolean) {
+            if (isPlaying) {
+                handlePlaybackChange(PlaybackStateCompat.STATE_PLAYING)
+            } else {
+                handlePlaybackChange(PlaybackStateCompat.STATE_STOPPED)
+            }
+        }
+
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            super.onPlayWhenReadyChanged(playWhenReady, reason)
+            if (!playWhenReady) {
+                if (player.mediaItemCount == 0) {
+                    stopSelf()
+                }
+                when (reason) {
+                    Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM -> {
+                        handlePlaybackEnded()
+                    }
+                    else -> {
+                        handlePlaybackChange(PlaybackStateCompat.STATE_STOPPED)
+                    }
+                }
+            } else if (playWhenReady && player.playbackState == Player.STATE_BUFFERING) {
+                handlePlaybackChange(PlaybackStateCompat.STATE_BUFFERING)
+            }
+        }
+
+        override fun onPlayerError(error: PlaybackException) {
+            super.onPlayerError(error)
+            val errorMsg = error.localizedMessage ?: "Unknown error"
+            LogHelper.e(TAG, "ExoPlayer Error Code: ${error.errorCodeName}, Message: $errorMsg")
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                Toast.makeText(applicationContext, "播放失败: ${error.errorCodeName}", Toast.LENGTH_LONG).show()
+            }
+        }
+
+        override fun onMetadata(metadata: Metadata) {
+            super.onMetadata(metadata)
+            for (i in 0 until metadata.length()) {
+                val entry = metadata[i]
+                if (entry is IcyInfo) {
+                    val icyInfo = entry as IcyInfo
+                    updateMetadata(icyInfo.title)
+                } else if (entry is IcyHeaders) {
+                    val icyHeaders = entry as IcyHeaders
+                    LogHelper.i(TAG, "icyHeaders:" + icyHeaders.name + " - " + icyHeaders.genre)
+                } else {
+                    LogHelper.w(TAG, "Unsupported metadata received (type = ${entry.javaClass.simpleName})")
+                    updateMetadata(null)
+                }
+            }
         }
     }
 
