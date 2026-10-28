@@ -38,9 +38,19 @@ import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import androidx.media.MediaBrowserServiceCompat
 import com.google.android.exoplayer2.*
 import com.google.android.exoplayer2.analytics.AnalyticsListener
+import com.google.android.exoplayer2.audio.AudioAttributes
 import com.google.android.exoplayer2.ext.mediasession.MediaSessionConnector
 import com.google.android.exoplayer2.ext.mediasession.TimelineQueueNavigator
+import com.google.android.exoplayer2.metadata.Metadata
+import com.google.android.exoplayer2.metadata.icy.IcyHeaders
+import com.google.android.exoplayer2.metadata.icy.IcyInfo
+import com.google.android.exoplayer2.source.MediaSource
+import com.google.android.exoplayer2.source.ProgressiveMediaSource
+import com.google.android.exoplayer2.source.hls.HlsMediaSource
 import com.google.android.exoplayer2.ui.PlayerNotificationManager
+import com.google.android.exoplayer2.upstream.DataSource
+import com.google.android.exoplayer2.upstream.DefaultHttpDataSource
+import com.google.android.exoplayer2.util.Util
 import kotlinx.coroutines.*
 import kotlinx.coroutines.Dispatchers.Main
 import org.videolan.libvlc.LibVLC
@@ -84,8 +94,25 @@ class PlayerService(): MediaBrowserServiceCompat() {
     private lateinit var sleepTimer: CountDownTimer
     private var sleepTimerTimeRemaining: Long = 0L
     private var playbackRestartCounter: Int = 0
+    private var isUsingVlc: Boolean = false
 
-    // 👉 libVLC 核心实例
+    private val attributes = AudioAttributes.Builder()
+            .setContentType(C.CONTENT_TYPE_MUSIC)
+            .setUsage(C.USAGE_MEDIA)
+            .build()
+
+    // 1. 标准 ExoPlayer 实例（用于支撑 ForwardingPlayer、通知栏和常规流）
+    private val player: ExoPlayer by lazy {
+        ExoPlayer.Builder(this).build().apply {
+            setAudioAttributes(attributes, true)
+            setHandleAudioBecomingNoisy(true)
+            repeatMode = Player.REPEAT_MODE_ALL
+            addListener(playerListener)
+            addAnalyticsListener(analyticsListener)
+        }
+    }
+
+    // 2. libVLC 实例与万能播放器（专门用于攻克 .m3u8 / TS 复杂流）
     private val libVLC: LibVLC by lazy {
         val options = ArrayList<String>()
         options.add("--no-audio-time-stretch")
@@ -93,7 +120,6 @@ class PlayerService(): MediaBrowserServiceCompat() {
         LibVLC(this, options)
     }
 
-    // 👉 libVLC 播放器实例
     private val vlcPlayer: MediaPlayer by lazy {
         MediaPlayer(libVLC).apply {
             setEventListener { event ->
@@ -122,25 +148,14 @@ class PlayerService(): MediaBrowserServiceCompat() {
     override fun onCreate() {
         super.onCreate()
 
-        // load modification date of collection
         modificationDate = PreferencesHelper.loadCollectionModificationDate()
-
-        // get the package validator
         packageValidator = PackageValidator(this, R.xml.allowed_media_browser_callers)
-
-        // fetch the player state
         playerState = PreferencesHelper.loadPlayerState()
-
-        // fetch the metadata history
         metadataHistory = PreferencesHelper.loadMetadataHistory()
 
-        // create a new MediaSession
         createMediaSession()
-
-        // create custom ForwardingPlayer used in Notification and playback control
         forwardingPlayer = createForwardingPlayer()
 
-        // MediaSessionConnector setup for libVLC integration
         mediaSessionConnector = MediaSessionConnector(mediaSession)
         mediaSessionConnector.setPlaybackPreparer(preparer)
         mediaSessionConnector.setQueueNavigator(object : TimelineQueueNavigator(mediaSession) {
@@ -149,14 +164,10 @@ class PlayerService(): MediaBrowserServiceCompat() {
             }
         })
 
-        // initialize notification helper
         notificationHelper = NotificationHelper(this, mediaSession.sessionToken, notificationListener)
-
-        // create and register collection changed receiver
         collectionChangedReceiver = createCollectionChangedReceiver()
         LocalBroadcastManager.getInstance(application).registerReceiver(collectionChangedReceiver, IntentFilter(Keys.ACTION_COLLECTION_CHANGED))
 
-        // load collection
         collection = FileHelper.readCollection(this)
     }
 
@@ -165,7 +176,7 @@ class PlayerService(): MediaBrowserServiceCompat() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
         if (intent != null && intent.action == Keys.ACTION_STOP) {
-            vlcPlayer.stop()
+            stopPlayback()
         }
         if (intent != null && intent.action == Keys.ACTION_START) {
             if (intent.hasExtra(Keys.EXTRA_STATION_UUID)) {
@@ -187,17 +198,30 @@ class PlayerService(): MediaBrowserServiceCompat() {
 
     /* Overrides onDestroy from Service */
     override fun onDestroy() {
-        if (vlcPlayer.isPlaying) {
-            handlePlaybackChange(PlaybackStateCompat.STATE_STOPPED)
-        }
-        vlcPlayer.stop()
+        stopPlayback()
         vlcPlayer.release()
         libVLC.release()
         mediaSession.run {
             isActive = false
             release()
         }
+        player.removeAnalyticsListener(analyticsListener)
+        player.removeListener(playerListener)
+        player.release()
         super.onDestroy()
+    }
+
+    private fun stopPlayback() {
+        if (isUsingVlc) {
+            vlcPlayer.stop()
+        } else {
+            player.stop()
+        }
+        handlePlaybackChange(PlaybackStateCompat.STATE_STOPPED)
+    }
+
+    private fun isPlaying(): Boolean {
+        return if (isUsingVlc) vlcPlayer.isPlaying else player.isPlaying
     }
 
 
@@ -266,7 +290,7 @@ class PlayerService(): MediaBrowserServiceCompat() {
         playbackRestartCounter = 0
         collection = CollectionHelper.savePlaybackState(this, collection, station, playbackState)
         updatePlayerState(station, playbackState)
-        if (vlcPlayer.isPlaying) {
+        if (isPlaying()) {
             notificationHelper.showNotificationForPlayer(forwardingPlayer)
         } else {
             updateMetadata(null)
@@ -278,28 +302,32 @@ class PlayerService(): MediaBrowserServiceCompat() {
     private fun handlePlaybackEnded() {
         if (playbackRestartCounter < 5) {
             playbackRestartCounter++
-            vlcPlayer.stop()
-            vlcPlayer.play()
+            if (isUsingVlc) {
+                vlcPlayer.stop()
+                vlcPlayer.play()
+            } else {
+                player.stop()
+                player.play()
+            }
         } else {
-            vlcPlayer.stop()
+            stopPlayback()
             Toast.makeText(this, this.getString(R.string.toastmessage_error_restart_playback_failed), Toast.LENGTH_LONG).show()
         }
     }
 
 
-    /* Creates a forwardingPlayer adapter for libVLC */
+    /* Creates a forwardingPlayer */
     private fun createForwardingPlayer() : ForwardingPlayer {
-        // 使用一个轻量适配层让 ForwardingPlayer 能够控制 libVLC 播放器
-        return object : ForwardingPlayer(PlayerStub(vlcPlayer)) {
+        return object : ForwardingPlayer(player) {
             override fun stop(reset: Boolean) {
                 stop()
             }
             override fun stop() {
-                vlcPlayer.stop()
+                stopPlayback()
                 notificationHelper.hideNotification()
             }
             override fun pause() {
-                vlcPlayer.stop()
+                stopPlayback()
             }
             override fun seekForward() {
                 seekToNext()
@@ -308,12 +336,12 @@ class PlayerService(): MediaBrowserServiceCompat() {
                 seekToPrevious()
             }
             override fun seekToNext() {
-                if (vlcPlayer.isPlaying) vlcPlayer.stop()
+                if (isPlaying()) stopPlayback()
                 station = CollectionHelper.getNextStation(collection, station.uuid)
                 preparer.onPrepare(true)
             }
             override fun seekToPrevious() {
-                if (vlcPlayer.isPlaying) vlcPlayer.stop()
+                if (isPlaying()) stopPlayback()
                 station = CollectionHelper.getPreviousStation(collection, station.uuid)
                 preparer.onPrepare(true)
             }
@@ -334,36 +362,53 @@ class PlayerService(): MediaBrowserServiceCompat() {
     }
 
 
-    /* Prepares player with media source created from current station using libVLC */
+    /* Prepares player: .m3u8 streams use libVLC, regular streams use ExoPlayer */
     private fun preparePlayer(playWhenReady: Boolean) {
         if (!station.isValid()) {
             LogHelper.e(TAG, "Unable to start playback. No radio station has been loaded.")
             return
         }
 
-        if (vlcPlayer.isPlaying) {
-            vlcPlayer.stop()
+        // 停止之前的播放
+        if (isPlaying()) {
+            stopPlayback()
         }
 
         val streamUriString = station.getStreamUri()
-        try {
-            val media = Media(libVLC, Uri.parse(streamUriString))
-            
-            // 注入浏览器 User-Agent 以及阿里云 CDN 防盗链 Referer/Origin 请求头
-            val customUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            media.addOption(":http-user-agent=$customUserAgent")
-            media.addOption(":http-referrer=https://v.myalicdn.com/")
-            media.addOption(":network-caching=1500")
-            
-            vlcPlayer.media = media
-            media.release()
 
-            if (playWhenReady) {
-                vlcPlayer.play()
+        // 判断是否为 .m3u8 复杂流，如果是则使用 libVLC 软解播放，否则使用 ExoPlayer
+        if (streamUriString.contains(".m3u8", ignoreCase = true) || station.streamContent in Keys.MIME_TYPE_HLS) {
+            isUsingVlc = true
+            try {
+                val media = Media(libVLC, Uri.parse(streamUriString))
+                val customUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                media.addOption(":http-user-agent=$customUserAgent")
+                media.addOption(":http-referrer=https://v.myalicdn.com/")
+                media.addOption(":network-caching=1500")
+
+                vlcPlayer.media = media
+                media.release()
+
+                if (playWhenReady) {
+                    vlcPlayer.play()
+                }
+                updateMetadata(station.name)
+            } catch (e: Exception) {
+                LogHelper.e(TAG, "Failed to prepare libVLC media: $e")
             }
+        } else {
+            isUsingVlc = false
+            val mediaItem = MediaItem.fromUri(streamUriString)
+            val dataSourceFactory: DataSource.Factory = DefaultHttpDataSource.Factory().apply {
+                setUserAgent(Util.getUserAgent(this@PlayerService, Keys.APPLICATION_NAME))
+                setAllowCrossProtocolRedirects(true)
+            }
+            val mediaSource = ProgressiveMediaSource.Factory(dataSourceFactory).createMediaSource(mediaItem)
+            player.setMediaSource(mediaSource)
+            player.prepare()
+            mediaSessionConnector.setPlayer(forwardingPlayer)
             updateMetadata(station.name)
-        } catch (e: Exception) {
-            LogHelper.e(TAG, "Failed to prepare libVLC media: $e")
+            player.playWhenReady = playWhenReady
         }
     }
 
@@ -376,7 +421,7 @@ class PlayerService(): MediaBrowserServiceCompat() {
         sleepTimer = object:CountDownTimer(Keys.SLEEP_TIMER_DURATION + sleepTimerTimeRemaining, Keys.SLEEP_TIMER_INTERVAL) {
             override fun onFinish() {
                 sleepTimerTimeRemaining = 0L
-                vlcPlayer.stop()
+                stopPlayback()
             }
             override fun onTick(millisUntilFinished: Long) {
                 sleepTimerTimeRemaining = millisUntilFinished
