@@ -36,6 +36,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.os.bundleOf
 import androidx.localbroadcastmanager.content.LocalBroadcastManager
 import androidx.media.MediaBrowserServiceCompat
+import com.google.android.exoplayer2.ui.PlayerNotificationManager
 import kotlinx.coroutines.*
 import kotlinx.coroutines.Dispatchers.Main
 import org.videolan.libvlc.LibVLC
@@ -79,7 +80,7 @@ class PlayerService(): MediaBrowserServiceCompat() {
         val options = ArrayList<String>()
         options.add("--no-audio-time-stretch")
         options.add("--avcodec-codec=any")
-        options.add("--network-caching=3000") // 增加网络缓存应对直播流抖动
+        options.add("--network-caching=3000")
         options.add("--live-caching=3000")
         LibVLC(this, options)
     }
@@ -116,7 +117,23 @@ class PlayerService(): MediaBrowserServiceCompat() {
         metadataHistory = PreferencesHelper.loadMetadataHistory()
 
         createMediaSession()
-        notificationHelper = NotificationHelper(this, mediaSession.sessionToken, null)
+        
+        // 👉 传入合法的非空 NotificationListener 占位实现，解决 Kotlin 非空类型匹配报错
+        notificationHelper = NotificationHelper(this, mediaSession.sessionToken, object : PlayerNotificationManager.NotificationListener {
+            override fun onNotificationCancelled(notificationId: Int, dismissedByUser: Boolean) {
+                stopForeground(true)
+                isForegroundService = false
+                stopSelf()
+            }
+            override fun onNotificationPosted(notificationId: Int, notification: Notification, ongoing: Boolean) {
+                if (ongoing && !isForegroundService) {
+                    ContextCompat.startForegroundService(applicationContext, Intent(applicationContext, this@PlayerService.javaClass))
+                    startForeground(Keys.NOW_PLAYING_NOTIFICATION_ID, notification)
+                    isForegroundService = true
+                }
+            }
+        })
+
         collectionChangedReceiver = createCollectionChangedReceiver()
         LocalBroadcastManager.getInstance(application).registerReceiver(collectionChangedReceiver, IntentFilter(Keys.ACTION_COLLECTION_CHANGED))
 
@@ -212,7 +229,7 @@ class PlayerService(): MediaBrowserServiceCompat() {
         collection = CollectionHelper.savePlaybackState(this, collection, station, playbackState)
         updatePlayerState(station, playbackState)
         if (isPlaying()) {
-            // 触发前台通知展示
+            notificationHelper.updateNotification()
         } else {
             updateMetadata(null)
         }
@@ -249,7 +266,6 @@ class PlayerService(): MediaBrowserServiceCompat() {
             media.addOption(":http-user-agent=$customUserAgent")
             media.addOption(":http-referrer=https://v.myalicdn.com/")
             media.addOption(":network-caching=3000")
-            media.addOption(":rtsp-tcp") // 如果涉及底层封装容错
             
             vlcPlayer.media = media
             media.release()
